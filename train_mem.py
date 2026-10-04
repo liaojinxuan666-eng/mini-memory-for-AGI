@@ -34,11 +34,10 @@ def evaluate(model, n_noise, cfg, device):
         logits = model(x)
         shifted_logits = logits[:, :-1]
         shifted_y = y[:, 1:]
-        # bx 在 y[-3]，by 在 y[-2]
-        pred_bx = shifted_logits[:, -4].argmax(-1)
-        pred_by = shifted_logits[:, -3].argmax(-1)
-        gt_bx = shifted_y[:, -4]
-        gt_by = shifted_y[:, -3]
+        pred_bx = shifted_logits[:, -3].argmax(-1)
+        pred_by = shifted_logits[:, -2].argmax(-1)
+        gt_bx = shifted_y[:, -3]
+        gt_by = shifted_y[:, -2]
         acc_bx = (pred_bx == gt_bx).float().mean().item()
         acc_by = (pred_by == gt_by).float().mean().item()
         acc_both = ((pred_bx == gt_bx) & (pred_by == gt_by)).float().mean().item()
