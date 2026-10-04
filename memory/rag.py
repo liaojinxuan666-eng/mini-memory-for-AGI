@@ -2,15 +2,17 @@ import torch
 import torch.nn.functional as F
 
 
-def chunk_and_encode(h_all, x, chunk_size):
+def chunk_and_encode(h_all, x, chunk_size, n_ignore_tail=3):
     """
-    h_all: [B, L, d]
-    x:     [B, L]
-    返回:
-        keys:   [B, n_chunks, d]    chunk 内 hidden 的 mean
-        values: [B, n_chunks, chunk_size]
+    只对前 L - n_ignore_tail 个 token 做 chunk 编码。
+    排除末尾的 [QUERY, bx, by]，避免答案泄漏进 memory。
     """
-    B, L, d = h_all.shape
+    B, L_full, d = h_all.shape
+    L = L_full - n_ignore_tail
+
+    h_all = h_all[:, :L]
+    x = x[:, :L]
+
     n_chunks = (L + chunk_size - 1) // chunk_size
     pad_len = n_chunks * chunk_size - L
 
@@ -18,7 +20,6 @@ def chunk_and_encode(h_all, x, chunk_size):
         x_pad = torch.cat(
             [x, torch.zeros(B, pad_len, dtype=x.dtype, device=x.device)], dim=1
         )
-        # h_all 也 pad，mean 时排除 pad 位置
         h_pad = torch.cat(
             [h_all, torch.zeros(B, pad_len, d, dtype=h_all.dtype, device=h_all.device)],
             dim=1,
@@ -28,11 +29,9 @@ def chunk_and_encode(h_all, x, chunk_size):
             dim=1,
         )
     else:
-        x_pad = x
-        h_pad = h_all
+        x_pad, h_pad = x, h_all
         mask = torch.ones(B, L, device=x.device)
 
-    # mean pooling（排除 padding）
     h_view = h_pad.view(B, n_chunks, chunk_size, d)
     m_view = mask.view(B, n_chunks, chunk_size).unsqueeze(-1)
     keys = (h_view * m_view).sum(dim=2) / (m_view.sum(dim=2) + 1e-6)
