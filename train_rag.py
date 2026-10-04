@@ -6,20 +6,23 @@ import torch.nn.functional as F
 from config import CFG
 from model import HybridLM
 from data import make_recall_batch
-from memory.rag import chunk_and_encode, retrieve, build_augmented
+from memory.rag import chunk_and_encode, retrieve, build_augmented_before_query
 
 
 CHUNK_SIZE = 16
 TOPK = 2
 
 
-def _acc(logits, y):
-    shifted_logits = logits[:, :-1]
-    shifted_y = y[:, 1:]
-    pred_bx = shifted_logits[:, -3].argmax(-1)
-    pred_by = shifted_logits[:, -2].argmax(-1)
-    gt_bx = shifted_y[:, -3]
-    gt_by = shifted_y[:, -2]
+def _eval_from_logits(logits, q_pos, x):
+    """logits: [B, L_aug, V], q_pos: [B], x: [B, L] 原序列"""
+    B = x.shape[0]
+    ar = torch.arange(B, device=logits.device)
+    logit_q = logits[ar, q_pos]                    # 预测 bx
+    logit_bx = logits[ar, q_pos + 1]               # 预测 by
+    gt_bx = x[:, -2]
+    gt_by = x[:, -1]
+    pred_bx = logit_q.argmax(-1)
+    pred_by = logit_bx.argmax(-1)
     return (
         (pred_bx == gt_bx).float().mean().item(),
         (pred_by == gt_by).float().mean().item(),
@@ -34,13 +37,15 @@ def evaluate(model, n_noise, device, use_rag):
         if use_rag:
             h = model.forward_hidden(x)
             keys, values = chunk_and_encode(h, x, CHUNK_SIZE)
-            q_pos = x.shape[1] - 3
-            idx = retrieve(h[:, q_pos], keys, TOPK)
-            x_in, offset = build_augmented(x, values, idx)
-            logits = model(x_in)[:, offset:]
+            idx = retrieve(h[:, x.shape[1] - 3], keys, TOPK)
+            x_aug, q_pos = build_augmented_before_query(x, values, idx)
+            logits = model(x_aug)
+            return _eval_from_logits(logits, q_pos, x)
         else:
             logits = model(x)
-        return _acc(logits, y)
+            B, L = x.shape
+            q_pos = torch.full((B,), L - 3, dtype=torch.long, device=x.device)
+            return _eval_from_logits(logits, q_pos, x)
 
 
 def train_one(use_rag, steps, n_noise, cfg=CFG, device="cuda"):
@@ -70,17 +75,19 @@ def train_one(use_rag, steps, n_noise, cfg=CFG, device="cuda"):
             with torch.no_grad():
                 h = model.forward_hidden(x)
                 keys, values = chunk_and_encode(h, x, CHUNK_SIZE)
-                q_pos = x.shape[1] - 3
-                idx = retrieve(h[:, q_pos], keys, TOPK)
-            x_in, offset = build_augmented(x, values, idx)
-            logits = model(x_in)[:, offset:]
+                idx = retrieve(h[:, x.shape[1] - 3], keys, TOPK)
+            x_aug, q_pos = build_augmented_before_query(x, values, idx)
+            logits = model(x_aug)
         else:
             logits = model(x)
+            B, L = x.shape
+            q_pos = torch.full((B,), L - 3, dtype=torch.long, device=x.device)
 
-        loss = F.cross_entropy(
-            logits[:, :-1].reshape(-1, cfg.model.vocab_size),
-            y[:, 1:].reshape(-1),
-            ignore_index=-100,
+        B = x.shape[0]
+        ar = torch.arange(B, device=device)
+        loss = (
+            F.cross_entropy(logits[ar, q_pos], x[:, -2])
+            + F.cross_entropy(logits[ar, q_pos + 1], x[:, -1])
         )
         opt.zero_grad()
         loss.backward()
