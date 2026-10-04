@@ -9,8 +9,8 @@ from data import make_recall_batch
 from memory.rag import chunk_and_encode, retrieve, build_augmented_before_query
 
 
-CHUNK_SIZE = 16
-TOPK = 2
+CHUNK_SIZE = 8
+TOPK = 4
 
 
 def _eval_from_logits(logits, q_pos, x):
