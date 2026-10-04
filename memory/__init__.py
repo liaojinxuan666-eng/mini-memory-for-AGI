@@ -1,1 +1,1 @@
-from .layer import MemoryLayer
+from .bank import MemoryBank

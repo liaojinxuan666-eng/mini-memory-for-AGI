@@ -9,12 +9,12 @@ from .attention_block import AttentionBlock
 class HybridLM(nn.Module):
     def __init__(
         self,
-        vocab_size=64,
+        vocab_size=34,
         d_model=128,
         n_head=4,
         window=64,
         layer_kinds=None,
-        max_len=512,
+        max_len=1024,
         dropout=0.1,
     ):
         super().__init__()
@@ -40,7 +40,7 @@ class HybridLM(nn.Module):
         self.ln_f = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
 
-    def forward(self, x):
+    def _trunk(self, x):
         B, L = x.shape
         assert L <= self.max_len
         pos = torch.arange(L, device=x.device)
@@ -48,7 +48,15 @@ class HybridLM(nn.Module):
         h = self.drop(h)
         for layer in self.layers:
             h = layer(h)
-        return self.head(self.ln_f(h))
+        return self.ln_f(h)                     # [B, L, d]
+
+    def forward(self, x):
+        return self.head(self._trunk(x))
+
+    @torch.no_grad()
+    def forward_hidden(self, x):
+        """给检索用：只返回最后一层 hidden，不接 head。"""
+        return self._trunk(x)
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
