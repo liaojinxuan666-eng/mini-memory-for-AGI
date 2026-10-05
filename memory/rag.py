@@ -6,6 +6,12 @@ def chunk_and_encode(h_all, x, chunk_size, n_ignore_tail=3):
     """
     只对前 L - n_ignore_tail 个 token 做 chunk 编码。
     排除末尾的 [QUERY, bx, by]，避免答案泄漏进 memory。
+
+    h_all: [B, L_full, d]
+    x:     [B, L_full]
+    返回:
+        keys:   [B, n_chunks, d]
+        values: [B, n_chunks, chunk_size]
     """
     B, L_full, d = h_all.shape
     L = L_full - n_ignore_tail
@@ -25,7 +31,8 @@ def chunk_and_encode(h_all, x, chunk_size, n_ignore_tail=3):
             dim=1,
         )
         mask = torch.cat(
-            [torch.ones(B, L, device=x.device), torch.zeros(B, pad_len, device=x.device)],
+            [torch.ones(B, L, device=x.device),
+             torch.zeros(B, pad_len, device=x.device)],
             dim=1,
         )
     else:
@@ -40,7 +47,6 @@ def chunk_and_encode(h_all, x, chunk_size, n_ignore_tail=3):
 
 
 def retrieve(query, keys, top_k):
-    """query [B,d], keys [B,N,d] -> idx [B,K]"""
     q = F.normalize(query, dim=-1)
     k = F.normalize(keys, dim=-1)
     sim = torch.einsum("bd,bnd->bn", q, k)
@@ -52,15 +58,9 @@ def retrieve(query, keys, top_k):
 def build_augmented_before_query(x, values, idx, n_ignore_tail=3):
     """
     把检索到的 chunk 插在序列尾部 QUERY 之前。
-
-    x: [B, L]
-    values: [B, N, C]
-    idx: [B, K]
-    n_ignore_tail: 序列末尾保留的 token 数（QUERY, bx, by 三个）
-
     返回:
         x_aug: [B, L + K*C]
-        q_pos: [B]  QUERY 在 x_aug 里的位置索引
+        q_pos: [B]
     """
     B, L = x.shape
     N, C = values.shape[1], values.shape[2]
@@ -70,10 +70,10 @@ def build_augmented_before_query(x, values, idx, n_ignore_tail=3):
         values, dim=1,
         index=idx.unsqueeze(-1).expand(-1, -1, C),
     )
-    retrieved_flat = retrieved.reshape(B, K * C)          # [B, K*C]
+    retrieved_flat = retrieved.reshape(B, K * C)
 
-    head = x[:, :L - n_ignore_tail]                        # [B, L-3]
-    tail = x[:, L - n_ignore_tail:]                        # [B, 3]  QUERY, bx, by
+    head = x[:, :L - n_ignore_tail]
+    tail = x[:, L - n_ignore_tail:]
 
     x_aug = torch.cat([head, retrieved_flat, tail], dim=1)
     q_pos = torch.full((B,), L - n_ignore_tail + K * C,
