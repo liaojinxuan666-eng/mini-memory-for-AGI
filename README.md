@@ -1,6 +1,6 @@
 # mini-memory-for-AGI
 
-最小认知架构，手机 + 免费 Colab 实现，一步步搭建、评估、迭代。
+最小认知架构，手机 + 免费 Colab/Kaggle 逐步搭建、评估、迭代。
 
 ## 总路线
 
@@ -14,7 +14,7 @@
 
 ## 环境约束
 
-- 手机写代码，Colab 免费 T4 GPU 训练
+- 手机写代码，Colab / Kaggle 免费 T4 GPU 训练
 - 不碰危险自我复制、不碰关键基础设施
 - 每个模块都能跑、能评估、能迭代
 
@@ -30,17 +30,17 @@
 
 | 模型 | 参数量 | acc | 训练时间 |
 |---|---:|---:|---:|
-| 纯 SSM | 1,176,xxx | 0.0225 | 189s |
+| 纯 SSM | 1,176,640 | 0.0225 | 189s |
 | 纯 Attention | 509,616 | 1.0000 | 12s |
 | Hybrid (3:1:3) | 1,221,184 | 1.0000 | 162s |
 
 **结论**：
 - 纯 SSM 无精确检索能力，短序列 Copy 失败
 - 纯 Attention 短序列高效，但受窗口限制
-- Hybrid 兼顾流式与检索，序列变长时优势才显现
+- Hybrid 兼顾流式与检索
 
-**踩坑记录**：
-- MambaBlock 串行扫描 → 改并行扫描（倍增法），提速 2.7 倍
+**踩坑**：
+- MambaBlock 串行扫描 → 改并行扫描（倍增法），提速 2.7x
 - `_init_weights` 会覆盖 A_log，导致 SSM 失效
 - Colab Python 3.13 + torch 默认无 CUDA，需切 T4 GPU
 
@@ -48,40 +48,49 @@
 
 ## 阶段 2：外部记忆系统 ✅
 
-**目标**：把工作记忆里重要的片段按时间线刻进外部存储，突破 SSM 递归隐状态和 Attention 窗口的容量限制。
+**目标**：把重要的片段写入外部存储，突破 SSM 隐状态和 Attention 窗口的容量限制。
 
 **任务**：GridWorld Recall。
  
 输入: [bx, by, SEP, n_1, ..., n_L, SEP, QUERY, bx, by]
 目标: 只在 QUERY 后两个位置预测 bx, by
 
-**架构演进**：
+**三个版本的演进（重要，记录失败路径）**：
 
 | 版本 | 机制 | L=100 acc_both |
 |---|---|---:|
 | base（无记忆） | Hybrid | 0.0000 |
-| MemoryLayer | 可微神经图灵机，软写 | 0.0312 |
-| RAG v1 | last-token key, CHUNK=16, TOPK=2 | 0.3281 |
-| **RAG v2** | **mean pool key, CHUNK=8, TOPK=4** | **1.0000** |
+| v1: MemoryLayer | 可微 NTM，软写 | 0.0312 |
+| v2: RAG 无训练 | 冻结 encoder + 硬 top-k | 0.0312 |
+| v2 泄漏版（已废弃） | 未排除尾部 [QUERY, bx, by] | 1.0000（虚假） |
+| **v3: RAG + InfoNCE** | **可训练 retriever** | **1.0000** |
 
-**RAG v2 关键设计**：
-1. **冻结 encoder**：Hybrid 只做特征提取，不参与检索梯度
-2. **Chunk 切分**：每 8 个 token 为一个 chunk，用 chunk 内 hidden 的 mean 作为 key
-3. **非参数化存储**：key 和 value 都是张量，存在 CPU/GPU 内存
-4. **注入位置**：把检索回的 chunk 插在 QUERY 前（而非序列开头），让 Attention 窗口能直接看到
-5. **直接 CE loss**：在 QUERY 位置直接算两个 token 的交叉熵，不做全序列 shift
+**v3 关键设计**：
 
-**泛化结果**（500 步）：
+1. **chunk 化编码**：每 8 个 token 一个 chunk，chunk 内 hidden 求 mean 作为 key
+2. **排除尾部**：`chunk_and_encode(..., n_ignore_tail=3)` 不把 `[QUERY, bx, by]` 写进 memory，避免答案泄漏
+3. **可训练 retriever**：`Retriever` 模块把 query 和 key 投到同一空间，用 InfoNCE 对齐
+4. **注入位置**：检索回的 chunk 插在 QUERY 前（窗口 64 覆盖范围内）
+5. **直接 CE loss**：只在 QUERY 位置算两个 token 的交叉熵
 
-| 序列长度 | base acc_both | RAG v2 acc_both |
+**最终结果**（500 步，T4 GPU，seed=42）：
+
+| 序列长度 | hit@4 | acc_both |
 |---|---:|---:|
-| L=100 | 0.0000 | 1.0000 |
-| L=500 | 0.0000 | 1.0000 |
+| L=100 | 1.0000 | 1.0000 |
+| L=500 | 1.0000 | 1.0000 |
 
-**关键体会**：
-- 软写入的 MemoryLayer 会把信息在 EMA 中稀释掉，长序列必崩
+**结论**：
+- 软写 MemoryLayer 会把信息在 EMA 中稀释，长序列必崩
+- **RAG 的检索必须可训练**：冻结 encoder + 硬 top-k，梯度到不了 encoder，检索永远瞎猜
+- 一个 130 万参数的小 retriever 就能把 hit@4 从 0.05 拉到 1.0
 - 记忆应该是**非参数化的外挂硬盘**，而不是内嵌在主干里的脑组织
-- 检索位置比检索本身更重要：插入位置不对，信息等于没送进模型
+
+**踩坑**：
+- 未排除尾部导致信息泄漏，”成功“是假的
+- `subprocess.run` 在 Colab 会缓存输出，看不到进度
+- Kaggle 只有 `/kaggle/working/` 持久，`/root` 会清空
+- Kaggle 必须手机验证才能用 GPU，且要手动打开 Internet 开关
 
 ---
 
@@ -91,17 +100,22 @@ mini-memory-for-AGI/
 ├── config.py
 ├── data/
 │   ├── init.py
-│   └── gridworld.py          # GridWorld Recall 数据生成
+│   └── gridworld.py              # GridWorld Recall 数据生成
 ├── model/
 │   ├── init.py
-│   ├── mamba_block.py        # 并行扫描版 SSM
-│   ├── attention_block.py    # 滑动窗口 + RoPE
-│   └── hybrid.py             # SSM + Attention 主干
+│   ├── mamba_block.py            # 并行扫描版 SSM
+│   ├── attention_block.py        # 滑动窗口 + RoPE
+│   └── hybrid.py                 # SSM + Attention 主干
 ├── memory/
 │   ├── init.py
-│   ├── bank.py               # 非参数化记忆库
-│   └── rag.py                # chunk 编码、检索、注入
-├── train_rag.py              # 阶段 2 训练脚本
+│   ├── bank.py                   # 非参数化记忆库
+│   ├── rag.py                    # chunk 编码、检索、注入
+│   └── retriever.py              # 可训练 query/key 对齐
+├── legacy/                        # 失败的实验版本，仅作参考
+│   ├── memory_layer.py
+│   ├── hybrid_mem.py
+│   └── train_mem.py
+├── train_rag.py                   # 阶段 2 训练脚本
 └── README.md
 
 ---
@@ -111,9 +125,3 @@ mini-memory-for-AGI/
 在潜空间预测下一状态，为内在动机和行动闭环打基础。
  
  
-操作
-1. 手机浏览器打开 github.com/liaojinxuan666-eng/mini-memory-for-AGI
-2. 点 README.md
-3. 铅笔图标编辑
-4. 全选删掉 → 粘贴上面内容
-5. Commit 
